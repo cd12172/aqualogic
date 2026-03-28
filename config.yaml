@@ -1,0 +1,53 @@
+mqtt:
+  server: "localhost"
+  port: 1883
+  StatusTopic: "splitcreek/poolstatus"
+  IncomingCommandTopic: "splitcreek/poolbutton"
+  PoolLcdTopic: "splitcreek/poollcd"
+
+rs485_connection:
+  # Choose a host and TCP port, or a USB port depending on how you get the RS485
+  #host: "192.168.1.182"  # Optional if using a serial port
+  #port: 18899         # Optional if using a serial port
+  rs485_serial_port: "/dev/ttyUSB0"  # Optional if using host/port
+
+gpio_aliases:
+  ## "Pool Aux": Gpio Port
+  # Polaris Valve
+  "AUX_2": 26 
+  #Spillover Valve
+  "AUX_5": 20
+  #Skimmer
+  "AUX_4": 21
+  
+
+triggers:
+  - trigger_state: "AUX_1"  
+    trigger_value: 1
+    target_state: "AUX_2"
+    target_value: 1 
+  - trigger_state: "AUX_1"  
+    trigger_value: 0
+    target_state: "AUX_2"
+    target_value: 0
+  - trigger_state: "OP_MODE"
+    trigger_value: "POOL"
+    target_state: "AUX_5"
+    target_value: 1
+  - trigger_state: "OP_MODE"
+    trigger_value: "SPA"
+    target_state: "AUX_5"
+    target_value: 1
+  - trigger_state: "OP_MODE"
+    trigger_value: "SPILLOVER"
+    target_state: "AUX_5"
+    target_value: 1   
+
+wake_on_lan:
+  enabled: true
+  machines:
+    - name: "CynberNet"
+      mac: "00:CE:39:D2:FE:2A"
+      ip: "192.168.1.111"   # Optional (can be broadcast)
+      port: 9               # Optional (defaults to 9)
+
