@@ -66,6 +66,12 @@ def button_received(button):
             spa_distinct(op_mode)
         elif button == "SPILLOVER_DISTINCT":
             spillover_distinct(op_mode)
+        elif button.endswith("_ON"):
+            state = States[button[:-3]]
+            PANEL.set_state(state, True)
+        elif button.endswith("_OFF"):
+            state = States[button[:-4]]
+            PANEL.set_state(state, False)
         else:
             state = States[button]
             PANEL.set_state(state, not PANEL.get_state(state))
