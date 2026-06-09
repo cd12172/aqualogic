@@ -8,11 +8,15 @@ class MQTT_Manager:
         self.config = self.load_config(config_path)
         self.mqtt_server = self.config['mqtt']['server']
         self.mqtt_port = self.config['mqtt']['port']
+        self.mqtt_username = self.config['mqtt'].get('username')
+        self.mqtt_password = self.config['mqtt'].get('password')
         self.status_topic = self.config['mqtt']['StatusTopic']
         self.command_topic = self.config['mqtt']['IncomingCommandTopic']
         self.LcdTextTopic = self.config['mqtt']['PoolLcdTopic']
-        self.callback = callback 
+        self.callback = callback
         self.client = mqtt.Client()
+        if self.mqtt_username:
+            self.client.username_pw_set(self.mqtt_username, self.mqtt_password)
 
     def load_config(self, config_path):
         with open(config_path, 'r') as file:

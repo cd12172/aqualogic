@@ -1,6 +1,8 @@
 mqtt:
   server: "localhost"
   port: 1883
+  username: "poolpi"
+  password: "poolpi"
   StatusTopic: "splitcreek/poolstatus"
   IncomingCommandTopic: "splitcreek/poolbutton"
   PoolLcdTopic: "splitcreek/poollcd"
