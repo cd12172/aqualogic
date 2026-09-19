@@ -158,6 +158,13 @@ class AquaLogic():
 
     def _spa_temp_decay_tick(self):
         try:
+            if not self.get_state(States.FILTER):
+                # No circulation, so no mixing between the spa and pool
+                # water - pause the countdown rather than resetting it,
+                # so it resumes where it left off once the filter is
+                # back on.
+                return
+
             is_pool = self.get_state(States.POOL)
             is_spa = self.get_state(States.SPA)
 
