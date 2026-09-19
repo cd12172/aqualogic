@@ -33,11 +33,17 @@ class AquaLogic():
 
     # When the spa isn't running, the panel stops refreshing the spa
     # temperature reading, leaving it stuck at whatever it was while the
-    # spa was last heated. Simulate the water cooling back down toward
-    # the pool temperature so consumers see a realistic value.
+    # spa was last heated. Simulate the water cooling back down instead,
+    # so consumers see a realistic value:
+    #  - Filter on: the spa water mixes with the main pool body via
+    #    circulation, so it decays toward pool_temp.
+    #  - Filter off: no circulation, so heat is instead lost to the
+    #    (typically cooler, e.g. overnight) ambient air, and the smaller
+    #    spa body decays toward air_temp.
     SPA_TEMP_DECAY_INTERVAL = 60  # seconds
     SPA_TEMP_DECAY_DEGREES_POOL_MODE = 0.25
     SPA_TEMP_DECAY_DEGREES_SPILLOVER_MODE = 0.5
+    SPA_TEMP_DECAY_DEGREES_FILTER_OFF = 0.05
 
     # The panel only reports Pool/Spa/Air Temp while the filter pump is
     # running (no flow across the sensor otherwise). Persist the last
@@ -158,41 +164,41 @@ class AquaLogic():
 
     def _spa_temp_decay_tick(self):
         try:
-            if not self.get_state(States.FILTER):
-                # No circulation, so no mixing between the spa and pool
-                # water - pause the countdown rather than resetting it,
-                # so it resumes where it left off once the filter is
-                # back on.
-                return
+            if self.get_state(States.FILTER):
+                is_pool = self.get_state(States.POOL)
+                is_spa = self.get_state(States.SPA)
 
-            is_pool = self.get_state(States.POOL)
-            is_spa = self.get_state(States.SPA)
-
-            if is_pool and is_spa:
-                rate = self.SPA_TEMP_DECAY_DEGREES_SPILLOVER_MODE
-            elif is_pool and not is_spa:
-                rate = self.SPA_TEMP_DECAY_DEGREES_POOL_MODE
+                if is_pool and is_spa:
+                    rate = self.SPA_TEMP_DECAY_DEGREES_SPILLOVER_MODE
+                elif is_pool and not is_spa:
+                    rate = self.SPA_TEMP_DECAY_DEGREES_POOL_MODE
+                else:
+                    # Spa mode: actively heating, no decay.
+                    rate = None
+                target = self._pool_temp
             else:
-                # Spa mode (actively heating) or unknown/off: no decay.
-                rate = None
+                # No circulation: heat is lost to the ambient air rather
+                # than mixed with the main pool body.
+                rate = self.SPA_TEMP_DECAY_DEGREES_FILTER_OFF
+                target = self._air_temp
 
             if (rate is None or
                     self._spa_temp is None or
-                    self._pool_temp is None or
-                    self._spa_temp <= self._pool_temp):
+                    target is None or
+                    self._spa_temp <= target):
                 self._spa_temp_decay_accumulator = 0.0
                 return
 
             self._spa_temp_decay_accumulator += rate
             changed = False
             while (self._spa_temp_decay_accumulator >= 1.0 and
-                   self._spa_temp > self._pool_temp):
+                   self._spa_temp > target):
                 self._spa_temp -= 1
                 self._spa_temp_decay_accumulator -= 1.0
                 changed = True
 
-            if self._spa_temp <= self._pool_temp:
-                self._spa_temp = self._pool_temp
+            if self._spa_temp <= target:
+                self._spa_temp = target
                 self._spa_temp_decay_accumulator = 0.0
 
             if changed:
