@@ -5,7 +5,9 @@ pool controller."""
 from enum import IntEnum, unique
 from threading import Timer
 import binascii
+import json
 import logging
+import os
 import queue
 import socket
 import time
@@ -28,6 +30,20 @@ class AquaLogic():
     FRAME_ETX = 0x03
 
     READ_TIMEOUT = 5
+
+    # When the spa isn't running, the panel stops refreshing the spa
+    # temperature reading, leaving it stuck at whatever it was while the
+    # spa was last heated. Simulate the water cooling back down toward
+    # the pool temperature so consumers see a realistic value.
+    SPA_TEMP_DECAY_INTERVAL = 60  # seconds
+    SPA_TEMP_DECAY_DEGREES_POOL_MODE = 0.25
+    SPA_TEMP_DECAY_DEGREES_SPILLOVER_MODE = 0.5
+
+    # The panel only reports Pool/Spa/Air Temp while the filter pump is
+    # running (no flow across the sensor otherwise). Persist the last
+    # known readings so they keep being reported - instead of going
+    # unknown - while the filter is off or across a service restart.
+    STATE_FILE = os.path.join(os.path.dirname(__file__), '.state.json')
 
     # Local wired panel (black face with service button)
     FRAME_TYPE_LOCAL_WIRED_KEY_EVENT = b'\x00\x02'
@@ -63,12 +79,17 @@ class AquaLogic():
         self._send_queue = queue.Queue()
         self._multi_speed_pump = False
         self._heater_auto_mode = True  # Assume the heater is in auto mode
+        self._spa_temp_decay_accumulator = 0.0
+        self._data_changed_callback = None
         self.LcdText = None
+        self._load_persisted_temps()
 
         if web_port and web_port != 0:
             # Start the web server
             self._web = WebServer(self)
             self._web.start(web_port)
+
+        self._start_spa_temp_decay_timer()
 
     def connect(self, host, port):
         self.connect_socket(host, port)
@@ -106,6 +127,73 @@ class AquaLogic():
                     return
             else:
                 _LOGGER.debug('state change successful')
+
+    def _load_persisted_temps(self):
+        try:
+            with open(self.STATE_FILE, 'r') as state_file:
+                data = json.load(state_file)
+        except (OSError, ValueError):
+            return
+        self._pool_temp = data.get('pool_temp')
+        self._spa_temp = data.get('spa_temp')
+        self._air_temp = data.get('air_temp')
+        self._is_metric = data.get('is_metric', False)
+
+    def _persist_temps(self):
+        try:
+            with open(self.STATE_FILE, 'w') as state_file:
+                json.dump({
+                    'pool_temp': self._pool_temp,
+                    'spa_temp': self._spa_temp,
+                    'air_temp': self._air_temp,
+                    'is_metric': self._is_metric,
+                }, state_file)
+        except OSError:
+            _LOGGER.warning('Unable to persist temps to %s', self.STATE_FILE)
+
+    def _start_spa_temp_decay_timer(self):
+        timer = Timer(self.SPA_TEMP_DECAY_INTERVAL, self._spa_temp_decay_tick)
+        timer.daemon = True
+        timer.start()
+
+    def _spa_temp_decay_tick(self):
+        try:
+            is_pool = self.get_state(States.POOL)
+            is_spa = self.get_state(States.SPA)
+
+            if is_pool and is_spa:
+                rate = self.SPA_TEMP_DECAY_DEGREES_SPILLOVER_MODE
+            elif is_pool and not is_spa:
+                rate = self.SPA_TEMP_DECAY_DEGREES_POOL_MODE
+            else:
+                # Spa mode (actively heating) or unknown/off: no decay.
+                rate = None
+
+            if (rate is None or
+                    self._spa_temp is None or
+                    self._pool_temp is None or
+                    self._spa_temp <= self._pool_temp):
+                self._spa_temp_decay_accumulator = 0.0
+                return
+
+            self._spa_temp_decay_accumulator += rate
+            changed = False
+            while (self._spa_temp_decay_accumulator >= 1.0 and
+                   self._spa_temp > self._pool_temp):
+                self._spa_temp -= 1
+                self._spa_temp_decay_accumulator -= 1.0
+                changed = True
+
+            if self._spa_temp <= self._pool_temp:
+                self._spa_temp = self._pool_temp
+                self._spa_temp_decay_accumulator = 0.0
+
+            if changed:
+                self._persist_temps()
+                if self._data_changed_callback is not None:
+                    self._data_changed_callback(self)
+        finally:
+            self._start_spa_temp_decay_timer()
 
     def _read_byte_from_socket(self):
         data = self._socket.recv(1)
@@ -153,6 +241,7 @@ class AquaLogic():
         """Process data; returns when the reader signals EOF.
         Callback is notified when any data changes."""
         # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+        self._data_changed_callback = data_changed_callback
         try:
             while True:
                 # Data framing (from the AQ-CO-SERIAL manual):
@@ -295,13 +384,16 @@ class AquaLogic():
                             if self._pool_temp != value:
                                 self._pool_temp = value
                                 self._is_metric = parts[2][-1:] == 'C'
+                                self._persist_temps()
                                 data_changed_callback(self)
                         elif parts[0] == 'Spa' and parts[1] == 'Temp':
                             # Spa Temp <temp>°[C|F]
                             value = int(parts[2][:-2])
                             if self._spa_temp != value:
                                 self._spa_temp = value
+                                self._spa_temp_decay_accumulator = 0.0
                                 self._is_metric = parts[2][-1:] == 'C'
+                                self._persist_temps()
                                 data_changed_callback(self)
                         elif parts[0] == 'Air' and parts[1] == 'Temp':
                             # Air Temp <temp>°[C|F]
@@ -309,6 +401,7 @@ class AquaLogic():
                             if self._air_temp != value:
                                 self._air_temp = value
                                 self._is_metric = parts[2][-1:] == 'C'
+                                self._persist_temps()
                                 data_changed_callback(self)
                         elif parts[0] == 'Pool' and parts[1] == 'Chlorinator':
                             # Pool Chlorinator <value>%

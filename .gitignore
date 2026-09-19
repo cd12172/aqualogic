@@ -26,3 +26,6 @@ var/
 
 # System files
 .DS_Store
+
+# Persisted last-known temperature readings
+aqualogic/.state.json
