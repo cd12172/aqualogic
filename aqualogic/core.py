@@ -591,7 +591,8 @@ class AquaLogic():
         # Check to see if we have a change request pending; if we do
         # return the value we expect it to change to.
         for data in list(self._send_queue.queue):
-            desired_states = data['desired_states']
+            # Key presses from send_key() have no desired_states
+            desired_states = data.get('desired_states') or []
             for desired_state in desired_states:
                 if desired_state['state'] == state:
                     return desired_state['enabled']
