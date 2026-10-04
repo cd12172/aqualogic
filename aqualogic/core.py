@@ -113,7 +113,29 @@ class AquaLogic():
                           stopbits=serial.STOPBITS_TWO, timeout=self.READ_TIMEOUT)
         self._read = self._read_byte_from_serial
         self._write = self._write_to_serial
-    
+        try:
+            # Ask the driver for low-latency mode (FTDI: latency_timer 1ms)
+            self._serial.set_low_latency_mode(True)
+        except (AttributeError, NotImplementedError, ValueError, OSError) as ex:
+            _LOGGER.info('Could not set low latency mode: %s', ex)
+        self._check_usb_latency(serial_port_name)
+
+    def _check_usb_latency(self, serial_port_name):
+        # The panel only accepts a key frame within ~1ms of its keep-alive.
+        # FTDI adapters buffer reads for latency_timer ms (default 16), so we
+        # see the keep-alive too late and most key presses are ignored.
+        # Fix with a udev rule setting latency_timer to 1.
+        path = '/sys/bus/usb-serial/devices/{}/latency_timer'.format(
+            os.path.basename(os.path.realpath(serial_port_name)))
+        try:
+            with open(path) as file:
+                latency = int(file.read())
+        except (OSError, ValueError):
+            return
+        if latency > 1:
+            _LOGGER.warning('%s latency_timer is %d ms; key presses will be '
+                            'unreliable. Set it to 1.', serial_port_name, latency)
+
     def connect_io(self, io):
         self._io = io
         self._read = self._read_byte_from_io
@@ -246,7 +268,7 @@ class AquaLogic():
                     # Set a timer to verify the state changes
                     # Wait 2 seconds as it can take a while for
                     # the state to change.
-                    Timer(1.0, self._check_state, [data]).start()
+                    Timer(2.0, self._check_state, [data]).start()
             except KeyError:
                 pass
 
