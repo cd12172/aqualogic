@@ -8,6 +8,7 @@ import time
 import paho.mqtt.client as mqtt
 
 from .core import AquaLogic
+from .keys import Keys
 from .states import States
 from .mqtt_manager import MQTT_Manager
 from .Gpio import GpioController
@@ -55,6 +56,19 @@ manager.start()
 # Global variables
 previous_pool_status = {}
 
+# Keypad aliases for MQTT (e.g. a Home Assistant d-pad)
+KEY_ALIASES = {"UP": Keys.PLUS, "DOWN": Keys.MINUS, "ENTER": Keys.MENU}
+
+def keypad_key(button):
+    """Return the Keys member for a keypad payload, or None.
+    Names that are also States (FILTER, LIGHTS, AUX_x, ...) return None
+    so they keep their existing States-toggle behaviour."""
+    if button in KEY_ALIASES:
+        return KEY_ALIASES[button]
+    if button in Keys.__members__ and button not in States.__members__:
+        return Keys[button]
+    return None
+
 def button_received(button):
     try:
         pool_status = get_status_json(PANEL) 
@@ -66,6 +80,8 @@ def button_received(button):
             spa_distinct(op_mode)
         elif button == "SPILLOVER_DISTINCT":
             spillover_distinct(op_mode)
+        elif keypad_key(button) is not None:
+            PANEL.send_key(keypad_key(button))
         elif button.endswith("_ON"):
             state = States[button[:-3]]
             PANEL.set_state(state, True)
