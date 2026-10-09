@@ -3,7 +3,7 @@
 pool controller."""
 
 from enum import IntEnum, unique
-from threading import Lock, Timer
+from threading import Timer
 import binascii
 import json
 import logging
@@ -88,16 +88,6 @@ class AquaLogic():
         self._spa_temp_decay_accumulator = 0.0
         self._data_changed_callback = None
         self.LcdText = None
-        self._spa_poller = None   # set by cli (spa_poll.SpaTempPoller)
-        self._last_tx_time = 0.0
-        # set_state bookkeeping: the newest request per state wins, older
-        # ones (queued or awaiting their check) are dropped. Without this,
-        # opposite requests for a toggle key (LIGHTS on, then off) each
-        # re-toggle on retry and fight until their retries run out.
-        self._request_lock = Lock()
-        self._request_gen = 0
-        self._latest_request = {}   # state -> gen of newest request
-        self._pending_checks = 0    # sent requests awaiting _check_state
         self._load_persisted_temps()
 
         if web_port and web_port != 0:
@@ -151,45 +141,20 @@ class AquaLogic():
         self._read = self._read_byte_from_io
         self._write = self._write_to_io
 
-    def _is_superseded(self, data):
-        """True if a newer set_state targets any of this request's states."""
-        gen = data.get('gen')
-        if gen is None:
-            return False
-        with self._request_lock:
-            return any(self._latest_request.get(ds['state']) != gen
-                       for ds in data['desired_states'])
-
-    def _is_satisfied(self, data):
-        return all(self.get_state(ds['state']) == ds['enabled']
-                   for ds in data['desired_states'])
-
-    def busy(self):
-        """True while a key is queued or a state change is being verified."""
-        return not self._send_queue.empty() or self._pending_checks > 0
-
     def _check_state(self, data):
-        try:
-            if self._is_superseded(data):
-                _LOGGER.info('superseded request dropped')
-                return
-            desired_states = data['desired_states']
-            for desired_state in desired_states:
-                if (self.get_state(desired_state['state']) !=
-                        desired_state['enabled']):
-                    # The state hasn't changed
-                    data['retries'] -= 1
-                    if data['retries'] != 0:
-                        # Re-queue the request
-                        _LOGGER.info('requeue')
-                        data['retry'] = True
-                        self._send_queue.put(data)
-                        return
-                else:
-                    _LOGGER.debug('state change successful')
-        finally:
-            with self._request_lock:
-                self._pending_checks -= 1
+        desired_states = data['desired_states']
+        for desired_state in desired_states:
+            if (self.get_state(desired_state['state']) !=
+                    desired_state['enabled']):
+                # The state hasn't changed
+                data['retries'] -= 1
+                if data['retries'] != 0:
+                    # Re-queue the request
+                    _LOGGER.info('requeue')
+                    self._send_queue.put(data)
+                    return
+            else:
+                _LOGGER.debug('state change successful')
 
     def _load_persisted_temps(self):
         try:
@@ -294,28 +259,6 @@ class AquaLogic():
     def _send_frame(self):
         if not self._send_queue.empty():
             data = self._send_queue.get(block=False)
-            guard = data.get('guard')
-            if guard is not None:
-                try:
-                    ok = guard()
-                except Exception:  # pylint: disable=broad-except
-                    _LOGGER.exception('Spa temp poll guard failed')
-                    ok = False
-                if not ok:
-                    _LOGGER.info('Spa temp poll: dropped queued RIGHT '
-                                 '(no longer safe)')
-                    return
-            if data.get('desired_states') is not None:
-                try:
-                    if self._is_superseded(data):
-                        _LOGGER.info('superseded request dropped')
-                        return
-                    if data.get('retry') and self._is_satisfied(data):
-                        _LOGGER.info('retry skipped, state already as desired')
-                        return
-                except Exception:  # pylint: disable=broad-except
-                    _LOGGER.exception('request check failed; sending anyway')
-            self._last_tx_time = time.monotonic()
             self._write(data['frame'])
             _LOGGER.info('%3.3f: Sent: %s', time.monotonic(),
                          binascii.hexlify(data['frame']))
@@ -325,8 +268,6 @@ class AquaLogic():
                     # Set a timer to verify the state changes
                     # Wait 2 seconds as it can take a while for
                     # the state to change.
-                    with self._request_lock:
-                        self._pending_checks += 1
                     Timer(2.0, self._check_state, [data]).start()
             except KeyError:
                 pass
@@ -416,15 +357,12 @@ class AquaLogic():
                 elif frame_type == self.FRAME_TYPE_LOCAL_WIRED_KEY_EVENT:
                     _LOGGER.debug('%3.3f: Local Wired Key: %s',
                                   frame_start_time, binascii.hexlify(frame))
-                    self._bus_key_seen()
                 elif frame_type == self.FRAME_TYPE_REMOTE_WIRED_KEY_EVENT:
                     _LOGGER.debug('%3.3f: Remote Wired Key: %s',
                                   frame_start_time, binascii.hexlify(frame))
-                    self._bus_key_seen()
                 elif frame_type == self.FRAME_TYPE_WIRELESS_KEY_EVENT:
                     _LOGGER.debug('%3.3f: Wireless Key: %s',
                                   frame_start_time, binascii.hexlify(frame))
-                    self._bus_key_seen()
                 elif frame_type == self.FRAME_TYPE_LEDS:
                     # _LOGGER.debug('%3.3f: LEDs: %s',
                     #              frame_start_time, binascii.hexlify(frame))
@@ -472,11 +410,6 @@ class AquaLogic():
 
                     self.LcdText = text
                     self._web.text_updated(text)
-                    if self._spa_poller is not None:
-                        try:
-                            self._spa_poller.on_display(text)
-                        except Exception:  # pylint: disable=broad-except
-                            _LOGGER.exception('Spa temp poll error (ignored)')
                     data_changed_callback(self)
 
                     try:
@@ -581,30 +514,8 @@ class AquaLogic():
 
         return frame
 
-    def _notify_external_key(self):
-        if self._spa_poller is not None:
-            try:
-                self._spa_poller.on_external_key()
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception('Spa temp poll error (ignored)')
-
-    def _bus_key_seen(self):
-        # A key frame from another device on the bus (a person at a remote
-        # keypad). Ignore our own frame echoing back right after we sent it.
-        if time.monotonic() - self._last_tx_time > 0.5:
-            self._notify_external_key()
-
-    def queue_poll_right(self, guard):
-        """Queue a RIGHT key press for the spa temp poller. RIGHT only:
-        there is deliberately no key argument. `guard` is re-checked
-        just before the frame is sent; if it fails the frame is dropped."""
-        _LOGGER.info('Spa temp poll: queueing RIGHT')
-        frame = self._get_key_event_frame(Keys.RIGHT)
-        self._send_queue.put({'frame': frame, 'guard': guard})
-
     def send_key(self, key):
         """Sends a key."""
-        self._notify_external_key()
         _LOGGER.info('Queueing key %s', key)
         frame = self._get_key_event_frame(key)
         # Queue it to send immediately following the reception
@@ -718,7 +629,6 @@ class AquaLogic():
         is_enabled = self.get_state(state)
         if is_enabled == enable:
             return True
-        self._notify_external_key()
 
         key = None
 
@@ -759,25 +669,10 @@ class AquaLogic():
 
         frame = self._get_key_event_frame(key)
 
-        # Last command wins: drop queued requests for the same state(s) and
-        # mark in-flight ones as superseded (see _is_superseded).
-        targets = {ds['state'] for ds in desired_states}
-        with self._request_lock:
-            self._request_gen += 1
-            gen = self._request_gen
-            for target in targets:
-                self._latest_request[target] = gen
-        with self._send_queue.mutex:
-            kept = [d for d in self._send_queue.queue
-                    if not targets & {ds['state'] for ds in
-                                      (d.get('desired_states') or [])}]
-            self._send_queue.queue.clear()
-            self._send_queue.queue.extend(kept)
-
         # Queue it to send immediately following the reception
         # of a keep-alive packet in an attempt to avoid bus collisions.
         self._send_queue.put({'frame': frame, 'desired_states': desired_states,
-                              'retries': 10, 'gen': gen})
+                              'retries': 10})
 
         return True
 

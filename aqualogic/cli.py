@@ -12,7 +12,6 @@ from .keys import Keys
 from .states import States
 from .mqtt_manager import MQTT_Manager
 from .Gpio import GpioController
-from .spa_poll import SpaTempPoller
 
 
 # Configure logging
@@ -47,17 +46,6 @@ else:
     PANEL.connect(host, int(port))
 print('Connected!')
 
-# Faster spa temp readings: step the LCD with RIGHT while in spa mode.
-# Optional config (defaults shown):
-#   spa_temp_poll: {enabled: true, interval: 10, pause_after_user: 60}
-spa_poll_config = config.get('spa_temp_poll') or {}
-SPA_POLLER = SpaTempPoller(PANEL,
-                           interval=spa_poll_config.get('interval', 10),
-                           pause_after_user=spa_poll_config.get('pause_after_user', 60))
-SPA_POLLER.enabled = bool(spa_poll_config.get('enabled', True))
-PANEL._spa_poller = SPA_POLLER
-SPA_POLLER.start()
-
 # Initialize GPIO Controller
 gpio_controller = GpioController()
 
@@ -86,11 +74,7 @@ def button_received(button):
         pool_status = get_status_json(PANEL) 
         op_mode = pool_status.get("OP_MODE")
         print (f"interpreted op mode = {op_mode}")
-        if button in ("SPA_POLL_ON", "SPA_POLL_OFF"):
-            # Runtime switch for the spa temp poller (no key is sent)
-            SPA_POLLER.enabled = button == "SPA_POLL_ON"
-            print(f"Spa temp poll enabled = {SPA_POLLER.enabled}")
-        elif button == "POOL_DISTINCT":
+        if button == "POOL_DISTINCT":
             pool_distinct(op_mode)
         elif button == "SPA_DISTINCT":
             spa_distinct(op_mode)
